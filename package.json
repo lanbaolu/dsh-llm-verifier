@@ -1,0 +1,63 @@
+{
+  "name": "@lanbaolu/dsh-llm-verifier",
+  "version": "0.0.1",
+  "description": "LLM-as-a-Verifier bridge for DSH: expose select/compare/track/ProgressTracker as agent tools via a Python stdio bridge (reuses the official llm-verifier package).",
+  "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lanbaolu/dsh-llm-verifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lanbaolu/dsh-llm-verifier/issues"
+  },
+  "homepage": "https://github.com/lanbaolu/dsh-llm-verifier",
+  "keywords": [
+    "dsh",
+    "plugin",
+    "llm-verifier",
+    "verifier",
+    "agent",
+    "reward",
+    "evaluation"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "@deepseek-ai/cordis": ">=4.0.0-rc <5",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

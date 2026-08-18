@@ -1,0 +1,10 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+.venv/
+scores/
+.DS_Store
+.dshwolf/
+__pycache__/
+*.pyc

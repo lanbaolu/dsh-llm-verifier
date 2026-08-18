@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-llm-verifier
+      name: '@dsh-external/dsh-llm-verifier'
