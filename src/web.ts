@@ -8,6 +8,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ProgressRecord } from './progress.ts'
+import type { PythonBridge } from './bridge.ts'
+import { getVerifierTaskStatus, startVerifierTask } from './tools.ts'
 
 export type BackendId = 'auto' | 'deepseek' | 'vertex' | 'openai'
 
@@ -16,6 +18,7 @@ export interface VerifierRuntimeConfig {
   model: string
   pythonBin: string
   bridgeTimeoutMs: number
+  deepseekEffort: string
 }
 
 export interface AvailableBackend {
@@ -30,6 +33,7 @@ export interface SaveConfigInput {
   model?: string
   pythonBin?: string
   bridgeTimeoutMs?: number
+  deepseekEffort?: string
 }
 
 export interface VerifierWebDeps {
@@ -39,6 +43,7 @@ export interface VerifierWebDeps {
   listProgress(): ProgressRecord[]
   clearProgress(): void
   getDiagnostics(): string
+  getBridge(): Promise<PythonBridge>
 }
 
 interface WebRouteLike {
@@ -133,11 +138,82 @@ export function registerVerifierWebRoutes(ctx: Context, deps: VerifierWebDeps): 
           }
           input.bridgeTimeoutMs = value
         }
+        if (body.deepseekEffort !== undefined) {
+          const effort = String(body.deepseekEffort)
+          if (effort !== '' && !['off', 'low', 'high', 'max'].includes(effort)) {
+            sendJson(res, 400, { ok: false, error: `invalid deepseekEffort: ${effort} (expect off/low/high/max or empty)` })
+            return
+          }
+          input.deepseekEffort = effort
+        }
         const result = await deps.saveConfig(input)
         sendJson(res, result.ok ? 200 : 400, result)
       } catch (error) {
         sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: `${API_PREFIX}/evaluate`,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      try {
+        const body = await readJsonBody(req)
+        const problem = String(body.problem ?? '')
+        const candidates = Array.isArray(body.candidates)
+          ? body.candidates.map((c: unknown) => String(c)).filter((c: string) => c.trim().length > 0)
+          : []
+        if (!problem.trim() || candidates.length === 0) {
+          sendJson(res, 400, { ok: false, error: '需要非空 problem 和 candidates 数组' })
+          return
+        }
+        const params: Record<string, unknown> = { problem, candidates }
+        if (body.criteria !== undefined) {
+          let criteria = body.criteria
+          if (typeof criteria === 'string' && /^[[{]/.test(criteria.trim())) {
+            try {
+              criteria = JSON.parse(criteria)
+            } catch {
+              // keep raw string
+            }
+          }
+          params.criteria = criteria
+        }
+        const nEval = Number(body.n_evaluations)
+        if (Number.isFinite(nEval) && nEval > 0) params.n_evaluations = nEval
+        const pivots = Number(body.pivots)
+        if (Number.isFinite(pivots) && pivots > 0) params.pivots = pivots
+        const isAsync = body.async !== false
+        if (isAsync) {
+          const taskId = startVerifierTask('select', params, deps.getBridge)
+          sendJson(res, 200, { ok: true, task_id: taskId, status: 'running', hint: `poll /evaluate/status?task_id=${taskId}` })
+          return
+        }
+        const bridge = await deps.getBridge()
+        const result = await bridge.request<any>('select', params)
+        sendJson(res, 200, { ok: true, result })
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: `${API_PREFIX}/evaluate/status`,
+    handler: async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const taskId = url.searchParams.get('task_id') ?? ''
+      if (!taskId) {
+        sendJson(res, 400, { ok: false, error: 'missing task_id' })
+        return
+      }
+      sendJson(res, 200, { ok: true, ...getVerifierTaskStatus(taskId) })
     },
   }))
 

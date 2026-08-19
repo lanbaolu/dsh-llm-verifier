@@ -15,7 +15,7 @@ export function apply(ctx: ClientContext): void {
       name: 'settings.section',
       id: '@lanbaolu/dsh-llm-verifier-panel',
       order: 60,
-      label: () => '✅ LLM Verifier',
+      label: () => 'LLM Verifier',
     }, LlmVerifierPanel),
   ), '@lanbaolu/dsh-llm-verifier: panel')
 }

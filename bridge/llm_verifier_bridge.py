@@ -136,6 +136,10 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("select requires a non-empty `candidates` array")
     criteria = kwargs.pop("criteria", None)
     kwargs["criteria"] = _criteria(criteria if criteria is not None else DEFAULT_CRITERIA)
+    # 默认收敛评估开销：官方默认 n_evaluations/pivots 偏大，会让 select 跑几十次
+    # LLM 评分并拖到桥超时（300s）乃至拖垮启动；调用方显式传参时不受影响。
+    kwargs.setdefault("n_evaluations", 1)
+    kwargs.setdefault("pivots", 2)
     kwargs = _filter_kwargs(kwargs, {
         "criteria", "images", "ground_truth_note", "n_evaluations",
         "pivots", "seed", "max_workers", "model", "cache", "progress",
@@ -165,6 +169,8 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("compare requires `candidate_b` string")
     criteria = kwargs.pop("criteria", None)
     kwargs["criteria"] = _criteria(criteria if criteria is not None else DEFAULT_CRITERIA)
+    # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
+    kwargs.setdefault("n_evaluations", 1)
     kwargs = _filter_kwargs(kwargs, {
         "criteria", "images", "ground_truth_note", "n_evaluations",
         "max_workers", "model", "client",
@@ -182,6 +188,8 @@ def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("track requires a non-empty `problem` string")
     if not isinstance(steps, list) or not steps:
         raise ValueError("track requires a non-empty `steps` array")
+    # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
+    kwargs.setdefault("n_evaluations", 1)
     kwargs = _filter_kwargs(kwargs, {
         "images", "checkpoint_steps", "n_evaluations", "max_workers",
         "model", "client",
@@ -197,6 +205,8 @@ def _handle_progress_start(params: dict[str, Any]) -> dict[str, Any]:
     problem = kwargs.pop("problem", None)
     if not isinstance(problem, str) or not problem.strip():
         raise ValueError("progress_start requires a non-empty `problem` string")
+    # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
+    kwargs.setdefault("n_evaluations", 1)
     kwargs = _filter_kwargs(kwargs, {
         "images", "n_evaluations", "max_workers", "model", "client",
     })

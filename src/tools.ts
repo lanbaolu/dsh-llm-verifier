@@ -53,6 +53,37 @@ interface VerifierTask {
 const verifierTasks = new Map<string, VerifierTask>()
 let verifierTaskSeq = 0
 
+/** 启动一个后台 verifier 任务，立即返回 task_id（供 agent 工具与 Web 路由共用）。 */
+export function startVerifierTask(method: string, params: any, getBridge: () => Promise<PythonBridge>): string {
+  const taskId = `verifier-${++verifierTaskSeq}`
+  const task: VerifierTask = { promise: Promise.resolve(), settled: false }
+  task.promise = getBridge()
+    .then((bridge) => bridge.request<any>(method, params))
+    .then(
+      (result) => {
+        task.settled = true
+        task.result = result
+        return result
+      },
+      (error) => {
+        task.settled = true
+        task.error = error instanceof Error ? error.message : String(error)
+        throw error
+      },
+    )
+  verifierTasks.set(taskId, task)
+  return taskId
+}
+
+/** 查询后台任务状态（供 agent 工具与 Web 路由共用）。 */
+export function getVerifierTaskStatus(taskId: string): { task_id: string; status: string; result?: any; error?: string } {
+  const task = verifierTasks.get(taskId)
+  if (!task) return { task_id: taskId, status: 'unknown' }
+  if (!task.settled) return { task_id: taskId, status: 'running' }
+  if (task.error !== undefined) return { task_id: taskId, status: 'error', error: task.error }
+  return { task_id: taskId, status: 'done', result: task.result }
+}
+
 export function registerVerifierTools(ctx: Context, getBridge: () => Promise<PythonBridge>): void {
   ctx.effect(() => {
     const disposers = [
@@ -259,23 +290,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
               // keep raw string
             }
           }
-          const taskId = `verifier-${++verifierTaskSeq}`
-          const task: VerifierTask = { promise: Promise.resolve(), settled: false }
-          task.promise = getBridge()
-            .then((bridge) => bridge.request<any>(args.method, params))
-            .then(
-              (result) => {
-                task.settled = true
-                task.result = result
-                return result
-              },
-              (error) => {
-                task.settled = true
-                task.error = error instanceof Error ? error.message : String(error)
-                throw error
-              },
-            )
-          verifierTasks.set(taskId, task)
+          const taskId = startVerifierTask(String(args.method ?? 'select'), params, getBridge)
           return { task_id: taskId, status: 'running', hint: `use verifier_task_status with task_id=${taskId} to poll` }
         },
       })),
@@ -291,11 +306,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
           render: (_args, value: Record<string, any>) => [{ type: 'text', text: JSON.stringify(value) }],
         },
         async execute(args: any): Promise<Record<string, any>> {
-          const task = verifierTasks.get(args.task_id)
-          if (!task) return { task_id: args.task_id, status: 'unknown' }
-          if (!task.settled) return { task_id: args.task_id, status: 'running' }
-          if (task.error !== undefined) return { task_id: args.task_id, status: 'error', error: task.error }
-          return { task_id: args.task_id, status: 'done', result: task.result }
+          return getVerifierTaskStatus(String(args.task_id ?? ''))
         },
       })),
     ]

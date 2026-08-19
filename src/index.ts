@@ -7,7 +7,7 @@
  * stays upstream; this plugin only owns process/JSON plumbing and tool
  * contracts.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,12 +35,16 @@ export interface Config {
   bridgeTimeoutMs?: number
   /** Default verifier model passed to llm-verifier when a tool omits `model`. */
   verifierModel?: string
+  /** DeepSeek reasoning effort: 'off' | 'low' | 'high' | 'max'（空 = 官方默认 high）。
+   *  high 精度最高但单次评分 60-120s；off/low 可降至 5-15s（精度略降）。 */
+  deepseekEffort?: string
 }
 
 export const Config = z.object({
   pythonBin: z.string().default(''),
-  bridgeTimeoutMs: z.number().default(300_000),
+  bridgeTimeoutMs: z.number().default(600_000),
   verifierModel: z.string().default(''),
+  deepseekEffort: z.string().default(''),
 })
 
 /** 未显式配置 pythonBin 时，优先使用插件自带 .venv，避免系统 Python PEP 668 限制。 */
@@ -75,6 +79,8 @@ interface RuntimeConfigStore {
   /** 用户显式指定的 pythonBin；空字符串表示使用插件自动解析（.venv 优先）。 */
   pythonBin: string
   bridgeTimeoutMs: number
+  /** DeepSeek reasoning effort；空字符串表示使用官方默认（high）。 */
+  deepseekEffort: string
 }
 
 function defaultRuntimeStore(config: Config): RuntimeConfigStore {
@@ -82,7 +88,8 @@ function defaultRuntimeStore(config: Config): RuntimeConfigStore {
     backend: 'auto',
     model: config.verifierModel ?? '',
     pythonBin: config.pythonBin ?? '',
-    bridgeTimeoutMs: config.bridgeTimeoutMs ?? 300_000,
+    bridgeTimeoutMs: config.bridgeTimeoutMs ?? 600_000,
+    deepseekEffort: config.deepseekEffort ?? '',
   }
 }
 
@@ -99,6 +106,7 @@ function loadRuntimeStore(config: Config): RuntimeConfigStore {
       bridgeTimeoutMs: typeof raw.bridgeTimeoutMs === 'number' && raw.bridgeTimeoutMs > 0
         ? raw.bridgeTimeoutMs
         : defaults.bridgeTimeoutMs,
+      deepseekEffort: typeof raw.deepseekEffort === 'string' ? raw.deepseekEffort : defaults.deepseekEffort,
     }
   } catch {
     return defaults
@@ -113,6 +121,7 @@ function persistRuntimeStore(store: RuntimeConfigStore): void {
     model: store.model,
     pythonBin: store.pythonBin,
     bridgeTimeoutMs: store.bridgeTimeoutMs,
+    deepseekEffort: store.deepseekEffort,
   }, null, 2) + '\n', 'utf8')
 }
 
@@ -248,16 +257,118 @@ function registerEvaluateCommand(ctx: Context, getBridge: () => Promise<PythonBr
   ctx.effect(() => dispose)
 }
 
-/** 层次 1：注入给 agent 的使用策略提示，让 agent 更主动调用 verifier_*。 */
+/** 注册 /evaluate-team 命令：读取 dsh-agent-teams 团队已完成任务的产出，
+ *  用 verifier_select 评审（team.description 为 problem、各 task.output 为候选），
+ *  结果导出到 scores/<teamId>.jsonl。 */
+function registerEvaluateTeamCommand(ctx: Context, getBridge: () => Promise<PythonBridge>): void {
+  const commands = (ctx as any).get?.('commands') ?? (ctx as any).commands
+  if (!commands || typeof commands.register !== 'function') return
+  const dispose = commands.register({
+    name: 'evaluate-team',
+    description:
+      'Evaluate a dsh-agent-teams team\'s completed task outputs with verifier_select and export to scores/<teamId>.jsonl. Usage: /evaluate-team [teamId] (defaults to the first team under .agent-teams).',
+    input: { hint: '[teamId]' },
+    handler: async ({ agent, rawInput }: any): Promise<any> => {
+      try {
+        // 1) 定位 .agent-teams 根目录（依次尝试当前目录与会话工作目录）
+        const bases = [process.cwd(), agent?.session?.header?.cwd, agent?.session?.workspace, agent?.session?.cwd]
+          .filter((v: unknown) => typeof v === 'string' && v.length > 0) as string[]
+        let teamRoot: string | undefined
+        for (const base of bases) {
+          const root = join(base, '.agent-teams')
+          if (existsSync(root)) {
+            teamRoot = root
+            break
+          }
+        }
+        if (!teamRoot) return { kind: 'error', text: '未找到 .agent-teams 目录（当前工作区没有 agent-teams 团队数据）' }
+
+        // 2) 定位团队目录
+        const teamId = String(rawInput ?? '').trim() || undefined
+        let teamDir: string | undefined
+        if (teamId) {
+          const dir = join(teamRoot, teamId)
+          teamDir = existsSync(join(dir, 'team.json')) ? dir : undefined
+          if (!teamDir) return { kind: 'error', text: `团队 ${teamId} 不存在（${dir}）` }
+        } else {
+          const dirs = readdirSync(teamRoot).filter((d) => existsSync(join(teamRoot, d, 'team.json')))
+          if (dirs.length === 0) return { kind: 'error', text: '.agent-teams 下没有团队数据（可传 teamId）' }
+          teamDir = join(teamRoot, dirs[0])
+        }
+
+        // 3) 收集已完成任务的产出
+        const team = JSON.parse(readFileSync(join(teamDir, 'team.json'), 'utf8'))
+        const done = (team.tasks ?? []).filter(
+          (t: any) => t.status === 'completed' && typeof t.output === 'string' && t.output.trim().length > 0,
+        )
+        if (done.length === 0) {
+          const statuses: string[] = Array.from(new Set((team.tasks ?? []).map((t: any) => t.status)))
+          return { kind: 'error', text: `团队 ${team.name ?? team.id} 没有已完成且带产出（output）的任务。任务状态分布：${JSON.stringify(statuses)}` }
+        }
+        const candidates = done.map(
+          (t: any) => `[${t.assignee ?? '?'}] ${t.subject}\n${t.output.slice(0, 4000)}`,
+        )
+        const problem = team.description || team.name || '团队任务产出评审'
+
+        // 4) verifier_select 评审
+        const bridge = await getBridge()
+        const result = await bridge.request<any>('select', {
+          problem,
+          candidates,
+          n_evaluations: 1,
+          pivots: 2,
+          criteria: {
+            Correctness: 'Does the output correctly solve the assigned task?',
+            Completeness: 'Does it fully address the task requirements?',
+            Clarity: 'Is the output clear, well-structured and actionable?',
+          },
+        })
+
+        // 5) 导出 JSONL
+        const root = fileURLToPath(new URL('..', import.meta.url))
+        const scoresDir = join(root, 'scores')
+        mkdirSync(scoresDir, { recursive: true })
+        const file = join(scoresDir, `${team.id ?? teamId ?? 'team'}.jsonl`)
+        writeFileSync(
+          file,
+          JSON.stringify({
+            team: team.name ?? team.id,
+            problem,
+            candidates,
+            scores: result.scores,
+            ranking: result.ranking,
+            at: new Date().toISOString(),
+          }) + '\n',
+          'utf8',
+        )
+        const best = result.index !== undefined ? done[result.index] : undefined
+        return {
+          kind: 'success',
+          text:
+            `已评审 ${done.length} 个成员产出并导出到 ${file}\n` +
+            `Scores: ${JSON.stringify(result.scores)}\n` +
+            `Ranking: ${JSON.stringify(result.ranking)}\n` +
+            `最优产出：${best ? `[${best.assignee}] ${best.subject}` : 'N/A'}`,
+        }
+      } catch (error) {
+        return { kind: 'error', text: `团队评审失败: ${error instanceof Error ? error.message : String(error)}` }
+      }
+    },
+  })
+  ctx.effect(() => dispose)
+}
+
+/** 使用策略提示：verifier_* 每次调用都会触发额外的 LLM 评分请求（可能较慢），
+ *  因此只应在用户显式要求时调用，避免 agent 开场/任意时刻主动触发慢调用。 */
 const VERIFIER_AGENT_STRATEGY = `## LLM Verifier 使用策略
 
-在以下情况主动使用 verifier_* 工具，而不是手动用命令行跑：
+\`verifier_*\` 工具用于 LLM 评估（选优/对比/进度/复盘），每次调用都会额外消耗 LLM 评分请求，可能耗时较长。**仅在用户显式要求时调用，不要主动触发**：
 
-- 当你准备给出多个候选方案时，先用 \`verifier_select\` 选优；
-- 当两个方案需要对比时，用 \`verifier_compare\`；
-- 长任务每完成一个关键步骤，用 \`verifier_progress\` 更新进度；
-- 任务收尾时，用 \`verifier_track\` 复盘。
-- 注意：\`verifier_select\` / \`verifier_compare\` 必须传 \`criteria\`（JSON 对象字符串，例如 {"Correctness":"..."}）。`
+- 用户明确要求"用 verifier / LLM 评估 / 选优对比"时；
+- 你已给出候选答案，且用户明确要求用 verifier 评估这些候选时。
+- 注意：\`verifier_select\` / \`verifier_compare\` 必须传 \`criteria\`（JSON 对象字符串，例如 {"Correctness":"..."}）。
+- 评估量大时建议传 \`n_evaluations\`=1、\`pivots\`=2 控制耗时。
+- 精度/耗时：DeepSeek 后端默认 high-effort 思维链，单次评分约 60-120s（精度最高）。如需提速，可在 LLM Verifier 设置面板把「DeepSeek 推理强度」调为 off/low（约 5-15s，精度略降），由用户自行权衡。调用前请向用户说明本次评估的预期耗时。`
 
 export function apply(ctx: Context, config: Config): void {
   let bridge: PythonBridge | undefined
@@ -328,6 +439,7 @@ export function apply(ctx: Context, config: Config): void {
     model: store.model,
     pythonBin: store.pythonBin || resolveDefaultPythonBin(),
     bridgeTimeoutMs: store.bridgeTimeoutMs,
+    deepseekEffort: store.deepseekEffort,
   })
 
   const detectBackends = async (): Promise<AvailableBackend[]> => {
@@ -398,11 +510,13 @@ export function apply(ctx: Context, config: Config): void {
     if (input.model !== undefined) store.model = input.model.trim()
     if (input.pythonBin !== undefined) store.pythonBin = input.pythonBin.trim()
     if (input.bridgeTimeoutMs !== undefined) store.bridgeTimeoutMs = input.bridgeTimeoutMs
+    if (input.deepseekEffort !== undefined) store.deepseekEffort = input.deepseekEffort
 
     const changed = before.backend !== store.backend
       || before.model !== store.model
       || before.pythonBin !== store.pythonBin
       || before.bridgeTimeoutMs !== store.bridgeTimeoutMs
+      || before.deepseekEffort !== store.deepseekEffort
     if (!changed) {
       return { ok: true, message: '配置未变化', restartBridge: false }
     }
@@ -427,6 +541,7 @@ export function apply(ctx: Context, config: Config): void {
         ...process.env,
         ...credentialsEnv,
         ...(runtime.model !== '' ? { LLM_VERIFIER_MODEL: runtime.model } : {}),
+        ...(runtime.deepseekEffort ? { DEEPSEEK_EFFORT: runtime.deepseekEffort } : {}),
       }
       const next = new PythonBridge(scriptUrl, runtime.pythonBin, runtime.bridgeTimeoutMs, env)
       next.start()
@@ -450,6 +565,7 @@ export function apply(ctx: Context, config: Config): void {
       listProgress: listProgressRecords,
       clearProgress: clearProgressRecords,
       getDiagnostics: () => bridge?.diagnostics ?? '',
+      getBridge,
     })
     return () => {
       for (const dispose of webDisposers) dispose()
@@ -462,6 +578,7 @@ export function apply(ctx: Context, config: Config): void {
   registerVerifierTools(ctx, getBridge)
   registerBestOfNCommand(ctx, getBridge)
   registerEvaluateCommand(ctx, getBridge)
+  registerEvaluateTeamCommand(ctx, getBridge)
   // P2: 注册为可复用的 evaluator 服务，供其他 DSH 插件/命令直接调用。
   new VerifierEvaluatorService(ctx, getBridge)
 }

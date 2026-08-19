@@ -18,6 +18,7 @@ interface RuntimeConfig {
   model: string
   pythonBin: string
   bridgeTimeoutMs: number
+  deepseekEffort: string
 }
 
 interface ProgressStepRecord {
@@ -210,7 +211,18 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
   const [backends, setBackends] = useState<BackendItem[]>([])
   const [backend, setBackend] = useState<BackendId>('auto')
   const [model, setModel] = useState('')
-  const [bridgeTimeoutMs, setBridgeTimeoutMs] = useState(300_000)
+  const [bridgeTimeoutMs, setBridgeTimeoutMs] = useState(600_000)
+  const [deepseekEffort, setDeepseekEffort] = useState('')
+
+  // 快速评估（Best-of-N 选优）
+  const [evalProblem, setEvalProblem] = useState('')
+  const [evalCandidates, setEvalCandidates] = useState('')
+  const [evalCriteria, setEvalCriteria] = useState('')
+  const [evalAsync, setEvalAsync] = useState(true)
+  const [evalRunning, setEvalRunning] = useState(false)
+  const [evalTaskId, setEvalTaskId] = useState('')
+  const [evalResult, setEvalResult] = useState<any>(null)
+  const [evalError, setEvalError] = useState('')
 
   const [progress, setProgress] = useState<ProgressRecord[]>([])
   const [selectedTrackerId, setSelectedTrackerId] = useState('')
@@ -230,7 +242,8 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
       setBackends(configData.backends ?? [])
       setBackend(configData.config.backend)
       setModel(configData.config.model ?? '')
-      setBridgeTimeoutMs(configData.config.bridgeTimeoutMs ?? 300_000)
+      setBridgeTimeoutMs(configData.config.bridgeTimeoutMs ?? 600_000)
+      setDeepseekEffort(configData.config.deepseekEffort ?? '')
       const records = Array.isArray(progressData.records) ? progressData.records as ProgressRecord[] : []
       setProgress(records)
       setSelectedTrackerId((prev) => {
@@ -265,7 +278,8 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
         body: JSON.stringify({
           backend,
           model: model.trim(),
-          bridgeTimeoutMs: Number(bridgeTimeoutMs) || 300_000,
+          bridgeTimeoutMs: Number(bridgeTimeoutMs) || 600_000,
+          deepseekEffort,
         }),
       })
       const data = await res.json().catch(() => null)
@@ -297,6 +311,64 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
     } finally {
       setClearing(false)
     }
+  }
+
+  /** 快速评估：POST /evaluate（同步或异步），异步则轮询 /evaluate/status。 */
+  async function runEvaluate(): Promise<void> {
+    setEvalError('')
+    setEvalResult(null)
+    const candidates = evalCandidates.split('\n').map((s) => s.trim()).filter(Boolean)
+    if (!evalProblem.trim() || candidates.length === 0) {
+      setEvalError('需要填写 problem 和至少一个候选（每行一个）')
+      return
+    }
+    setEvalRunning(true)
+    try {
+      const body: Record<string, unknown> = { problem: evalProblem, candidates, async: evalAsync }
+      if (evalCriteria.trim()) body.criteria = evalCriteria.trim()
+      const res = await fetch(`${API_BASE}/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+      if (data.task_id) {
+        setEvalTaskId(String(data.task_id))
+        await pollEvaluate(String(data.task_id))
+      } else {
+        setEvalResult(data.result)
+        setEvalRunning(false)
+      }
+    } catch (err) {
+      setEvalError(err instanceof Error ? err.message : String(err))
+      setEvalRunning(false)
+    }
+  }
+
+  /** 轮询异步评估结果（最多 10 分钟，每 5s 一次，覆盖桥 600s 超时）。 */
+  async function pollEvaluate(taskId: string): Promise<void> {
+    for (let i = 0; i < 120; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5_000))
+      try {
+        const res = await fetch(`${API_BASE}/evaluate/status?task_id=${encodeURIComponent(taskId)}`, { cache: 'no-store' })
+        const data = await res.json().catch(() => null)
+        if (data?.status === 'done') {
+          setEvalResult(data.result)
+          setEvalRunning(false)
+          return
+        }
+        if (data?.status === 'error') {
+          setEvalError(data.error || '评估失败')
+          setEvalRunning(false)
+          return
+        }
+      } catch {
+        // 网络抖动忽略，继续轮询
+      }
+    }
+    setEvalError('轮询超时（10 分钟），任务可能仍在后台运行')
+    setEvalRunning(false)
   }
 
   if (loading) {
@@ -370,6 +442,20 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
             onChange={(event) => setBridgeTimeoutMs(Number(event.target.value))}
           />
         </label>
+        <label style={{ display: 'grid', gap: 4 }}>
+          <span style={{ fontSize: 12 }}>DeepSeek 推理强度（精度↔速度）</span>
+          <select
+            style={{ ...inputStyle, minWidth: 200 }}
+            value={deepseekEffort}
+            onChange={(event) => setDeepseekEffort(event.target.value)}
+          >
+            <option value="">官方默认（high，精度最高，单次 60-120s）</option>
+            <option value="off">off（最快，约 5-15s，精度略降）</option>
+            <option value="low">low（较快）</option>
+            <option value="high">high（官方默认精度）</option>
+            <option value="max">max（最高精度，最慢）</option>
+          </select>
+        </label>
         <button type="button" style={buttonStyle} disabled={saving} onClick={() => void save()}>
           {saving ? '保存中…' : '保存配置'}
         </button>
@@ -385,6 +471,69 @@ export function LlmVerifierPanel(_props: SettingsSectionOwnerProps): React.JSX.E
           {message}
         </div>
       )}
+
+      <div style={{ ...sectionStyle, marginTop: 12 }}>
+        <h3 style={{ ...titleStyle, margin: 0 }}>快速评估（Best-of-N 选优）</h3>
+        <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+          <label style={{ display: 'grid', gap: 4 }}>
+            <span style={{ fontSize: 12 }}>问题 problem</span>
+            <textarea
+              style={{ ...inputStyle, minHeight: 48, resize: 'vertical' }}
+              value={evalProblem}
+              onChange={(event) => setEvalProblem(event.target.value)}
+              placeholder="要评估的任务/问题描述"
+            />
+          </label>
+          <label style={{ display: 'grid', gap: 4 }}>
+            <span style={{ fontSize: 12 }}>候选方案（每行一个）</span>
+            <textarea
+              style={{ ...inputStyle, minHeight: 96, resize: 'vertical' }}
+              value={evalCandidates}
+              onChange={(event) => setEvalCandidates(event.target.value)}
+              placeholder={'方案 A…\n方案 B…\n方案 C…'}
+            />
+          </label>
+          <label style={{ display: 'grid', gap: 4 }}>
+            <span style={{ fontSize: 12 }}>评估标准 criteria（可选：JSON 对象或预设名）</span>
+            <input
+              type="text"
+              style={inputStyle}
+              value={evalCriteria}
+              onChange={(event) => setEvalCriteria(event.target.value)}
+              placeholder='{"Correctness":"..."}'
+            />
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+            <input type="checkbox" checked={evalAsync} onChange={(event) => setEvalAsync(event.target.checked)} />
+            异步执行（不阻塞页面，后台跑完自动刷新；DeepSeek 默认 high 精度单次约 60-120s）
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button type="button" style={buttonStyle} disabled={evalRunning} onClick={() => void runEvaluate()}>
+              {evalRunning ? '评估中…' : '开始评估'}
+            </button>
+            {evalTaskId && <span style={{ fontSize: 12, opacity: 0.7 }}>任务：{evalTaskId}</span>}
+          </div>
+          {evalResult && (
+            <div style={{ fontSize: 12, background: 'rgba(127,127,127,.08)', padding: '8px 10px', borderRadius: 6 }}>
+              <div><strong>排名：</strong>{JSON.stringify(evalResult.ranking)}</div>
+              <div><strong>分数：</strong>{JSON.stringify(evalResult.scores)}</div>
+              {evalResult.index !== undefined && (
+                <div style={{ marginTop: 6 }}>
+                  <strong>最优候选：</strong>
+                  <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+                    {evalCandidates.split('\n').map((s) => s.trim()).filter(Boolean)[evalResult.index] ?? `候选 ${evalResult.index}`}
+                  </pre>
+                </div>
+              )}
+            </div>
+          )}
+          {evalError && (
+            <div style={{ ...messageStyle, color: 'var(--danger, #d1242f)' }} role="alert">
+              {evalError}
+            </div>
+          )}
+        </div>
+      </div>
 
       <div style={sectionStyle}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
