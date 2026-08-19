@@ -25,7 +25,7 @@ import {
   type VerifierRuntimeConfig,
 } from './web.ts'
 
-export const name = '@dsh-external/dsh-llm-verifier'
+export const name = '@lanbaolu/dsh-llm-verifier'
 export const inject = ['tools', 'credentials', 'systemPrompt']
 
 export interface Config {
@@ -38,6 +38,11 @@ export interface Config {
   /** DeepSeek reasoning effort: 'off' | 'low' | 'high' | 'max'（空 = 官方默认 high）。
    *  high 精度最高但单次评分 60-120s；off/low 可降至 5-15s（精度略降）。 */
   deepseekEffort?: string
+  /** Agent 开场/运行中如何接触 verifier_* 工具策略提示：
+   *  'explicit'（默认，方案 A）：注入“仅用户显式请求或 /evaluate-team 等命令触发”提示；
+   *  'prompted'（方案 B）：注入保留成本提示但允许按需评估的宽松提示；
+   *  'off'（方案 C）：不注入策略提示，完全不干预 agent。 */
+  agentStrategy?: 'explicit' | 'prompted' | 'off'
 }
 
 export const Config = z.object({
@@ -45,6 +50,7 @@ export const Config = z.object({
   bridgeTimeoutMs: z.number().default(600_000),
   verifierModel: z.string().default(''),
   deepseekEffort: z.string().default(''),
+  agentStrategy: z.union([z.const('explicit'), z.const('prompted'), z.const('off')]).default('explicit'),
 })
 
 /** 未显式配置 pythonBin 时，优先使用插件自带 .venv，避免系统 Python PEP 668 限制。 */
@@ -359,16 +365,36 @@ function registerEvaluateTeamCommand(ctx: Context, getBridge: () => Promise<Pyth
 }
 
 /** 使用策略提示：verifier_* 每次调用都会触发额外的 LLM 评分请求（可能较慢），
- *  因此只应在用户显式要求时调用，避免 agent 开场/任意时刻主动触发慢调用。 */
+ *  因此默认只应在用户显式要求时调用，避免 agent 开场/任意时刻主动触发慢调用。
+ *  通过 config.agentStrategy 可选择 explicit / prompted / off：
+ *  - explicit：默认，仅用户显式请求或 /evaluate-team 等命令触发；
+ *  - prompted：保留成本提示，但允许 agent 按需评估；
+ *  - off：完全不注入策略提示。 */
 const VERIFIER_AGENT_STRATEGY = `## LLM Verifier 使用策略
 
 \`verifier_*\` 工具用于 LLM 评估（选优/对比/进度/复盘），每次调用都会额外消耗 LLM 评分请求，可能耗时较长。**仅在用户显式要求时调用，不要主动触发**：
 
 - 用户明确要求"用 verifier / LLM 评估 / 选优对比"时；
+- 用户使用 \`/evaluate-team\`、\`/evaluate-session\`、\`/bestofn\` 等命令触发批量评审时；
 - 你已给出候选答案，且用户明确要求用 verifier 评估这些候选时。
 - 注意：\`verifier_select\` / \`verifier_compare\` 必须传 \`criteria\`（JSON 对象字符串，例如 {"Correctness":"..."}）。
 - 评估量大时建议传 \`n_evaluations\`=1、\`pivots\`=2 控制耗时。
 - 精度/耗时：DeepSeek 后端默认 high-effort 思维链，单次评分约 60-120s（精度最高）。如需提速，可在 LLM Verifier 设置面板把「DeepSeek 推理强度」调为 off/low（约 5-15s，精度略降），由用户自行权衡。调用前请向用户说明本次评估的预期耗时。`
+
+/** 宽松策略（agentStrategy='prompted'）：保留成本/耗时提示，但不禁止 agent 主动评估。 */
+const VERIFIER_AGENT_STRATEGY_PROMPTED = `## LLM Verifier 使用策略
+
+\`verifier_*\` 工具用于 LLM 评估（选优/对比/进度/复盘），每次调用都会额外消耗 LLM 评分请求，可能耗时较长。调用前请先向用户说明本次评估的预期耗时：
+
+- 注意：\`verifier_select\` / \`verifier_compare\` 必须传 \`criteria\`（JSON 对象字符串，例如 {"Correctness":"..."}）。
+- 评估量大时建议传 \`n_evaluations\`=1、\`pivots\`=2 控制耗时。
+- 精度/耗时：DeepSeek 后端默认 high-effort 思维链，单次评分约 60-120s（精度最高）。如需提速，可在 LLM Verifier 设置面板把「DeepSeek 推理强度」调为 off/low（约 5-15s，精度略降），由用户自行权衡。`
+
+function agentStrategyText(strategy: Config['agentStrategy']): string | null {
+  if (strategy === 'off') return null
+  if (strategy === 'prompted') return VERIFIER_AGENT_STRATEGY_PROMPTED
+  return VERIFIER_AGENT_STRATEGY
+}
 
 export function apply(ctx: Context, config: Config): void {
   let bridge: PythonBridge | undefined
@@ -379,9 +405,11 @@ export function apply(ctx: Context, config: Config): void {
     const assembled = await next()
     const sections = Array.isArray(assembled?.sections) ? assembled.sections : []
     if (sections.some((section: any) => section?.name === 'llm-verifier-agent-strategy')) return assembled
+    const text = agentStrategyText(config.agentStrategy)
+    if (!text) return assembled
     return {
       ...assembled,
-      sections: [...sections, { name: 'llm-verifier-agent-strategy', text: VERIFIER_AGENT_STRATEGY, order: 150 }],
+      sections: [...sections, { name: 'llm-verifier-agent-strategy', text, order: 150 }],
     }
   })
 

@@ -87,6 +87,31 @@ dsh plugin --profile web add /path/to/llm-verifier
 
 重启后插件通过 `cordis.patch.yml` 挂载。
 
+### 4. 测试期 vs 持久化装配（重要）
+
+**测试期一律使用 `dev_inject_plugin`（运行时注入）**，只有验证通过的版本才持久化装配：
+
+| 维度 | `dev_inject_plugin`（测试期） | `dev_install_package` / `dsh plugin add`（正式） |
+|---|---|---|
+| 持久化 | 否（重启后失效） | 是（写入 profile，重启后由 bundles 装配） |
+| 重启 | 不需要，立即生效 | 需要重启 DSH 才生效 |
+| 启动风险 | 低：坏版本不会阻止 DSH 启动 | 高：坏版本会导致 `ERR_MODULE_NOT_FOUND`/崩溃，阻塞服务 |
+| 适用场景 | 开发、测试、快速迭代、调试 | 验证通过后的正式装配 |
+
+用法：
+
+```text
+# 测试期：运行时注入，不持久化、不重启
+dev_inject_plugin { "dir": "/path/to/llm-verifier" }
+
+# 验证通过后：持久化装配（写入 dependencies+bundles 并建立 node_modules 链接）
+dev_install_package { "dir": "/path/to/llm-verifier" }
+# 或命令行等价：
+dsh plugin --profile web add /path/to/llm-verifier
+```
+
+> ⚠️ 不要把未验证通过的版本直接加入 profile bundles：坏版本会阻止 DSH 启动，形成“反复装回 → 启动崩溃 → 回滚”的循环。测试期需要回滚时，用 `dev_uninject_plugin` 卸载注入（运行时即净），或恢复 `cordis.patch.yml` 的 `disabled` 条目并从 profile 移除注册。
+
 ## 插件配置
 
 | 配置项 | 默认值 | 说明 |
@@ -94,6 +119,12 @@ dsh plugin --profile web add /path/to/llm-verifier
 | `pythonBin` | `python3` / `python`(Windows) | Python 可执行文件 |
 | `bridgeTimeoutMs` | `300000` | 单次桥调用超时（毫秒） |
 | `verifierModel` | 无 | 默认 verifier 模型 id，工具未传 `model` 时透传为 `LLM_VERIFIER_MODEL`（当前桥未强制消费，官方包自行决定默认后端） |
+| `agentStrategy` | `explicit` | Agent 策略提示：`explicit`（仅用户显式请求或 `/evaluate-team` 等命令触发，默认）/ `prompted`（保留成本提示但允许按需评估）/ `off`（不注入策略提示） |
+
+`agentStrategy` 用于控制 agent 的 system prompt 中是否注入 `verifier_*` 使用策略：
+- `explicit`：默认，明确要求 agent 仅在用户显式请求或使用 `/evaluate-team`、`/evaluate-session`、`/bestofn` 等命令时调用 verifier 工具，避免 agent 开场/任意时刻自动触发长耗时评分。
+- `prompted`：保留成本/耗时提示，但不禁止 agent 按需评估（适合需要 agent 自主评估的场景）。
+- `off`：完全不注入策略提示，适合用户已完全掌控工具调用的场景。
 
 示例 patch：
 
