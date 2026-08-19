@@ -1,6 +1,6 @@
 {
   "name": "@lanbaolu/dsh-llm-verifier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LLM-as-a-Verifier bridge for DSH: expose select/compare/track/ProgressTracker as agent tools via a Python stdio bridge (reuses the official llm-verifier package).",
   "type": "module",
   "publishConfig": {
