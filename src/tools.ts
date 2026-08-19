@@ -98,7 +98,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
           model: { type: 'string', description: 'Verifier model id (e.g. gemini-2.5-flash, deepseek-v4-flash). Default is llm-verifier configured backend.' },
           n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion (default 4).' },
           pivots: { type: 'number', description: 'Pivots for Probabilistic Pivot Tournament; fewer pivots reduce cost.' },
-          images: { type: 'array', items: { type: 'string' }, description: 'Optional image file paths/URLs; pass a one-element array for a single image.' },
+          images: { type: 'array', items: { type: 'string' }, description: 'Optional image file paths/URLs; pass a one-element array for a single image. ⚠️ DeepSeek 后端不支持图片（API 不接受 image_url 消息），图片会被桥自动忽略并降级为文本说明；仅 Vertex/Gemini 等多模态后端可用。' },
           seed: { type: 'number', description: 'Random seed.' },
           max_workers: { type: 'number', description: 'Max parallel verifier workers.' },
         },
@@ -140,7 +140,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
           criteria: { type: 'string', required: true, description: 'Evaluation criteria preset name or JSON object string. Required by the verifier backend.' },
           model: { type: 'string', description: 'Verifier model id.' },
           n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion.' },
-          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for multimodal verification.' },
+          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for multimodal verification. ⚠️ DeepSeek 后端不支持图片，会被桥自动忽略并降级为文本说明；仅 Vertex/Gemini 等多模态后端可用。' },
           seed: { type: 'number', description: 'Random seed.' },
         },
         output: {
@@ -179,7 +179,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
           checkpoint_steps: { type: 'array', items: { type: 'number' }, description: 'Optional 1-based checkpoint indices to score; defaults to every step.' },
           model: { type: 'string', description: 'Verifier model id.' },
           n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion.' },
-          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for multimodal verification.' },
+          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for multimodal verification. ⚠️ DeepSeek 后端不支持图片，会被桥自动忽略并降级为文本说明；仅 Vertex/Gemini 等多模态后端可用。' },
           seed: { type: 'number', description: 'Random seed.' },
         },
         output: {
@@ -214,7 +214,7 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
           step: { type: 'string', description: 'Next agent step text; required for update.' },
           model: { type: 'string', description: 'Verifier model id.' },
           n_evaluations: { type: 'number', description: 'Repeated evaluations per criterion.' },
-          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for the current step.' },
+          images: { type: 'array', items: { type: 'string' }, description: 'Optional images for the current step. ⚠️ DeepSeek 后端不支持图片，会被桥自动忽略。' },
           seed: { type: 'number', description: 'Random seed.' },
         },
         output: {

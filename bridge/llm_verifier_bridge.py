@@ -87,6 +87,42 @@ def _filter_kwargs(kwargs: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in allowed}
 
 
+def _sanitize_images(kwargs: dict[str, Any], method: str) -> None:
+    """防止把 `images` 编码成 DeepSeek API 不接受的 `image_url` 消息。
+
+    官方 llm-verifier 包收到非空 `images` 时，会把图片 base64 编码为
+    ``{"type": "image_url", ...}`` 的 content，而 DeepSeek API 端点只接受
+    ``text`` 类型 → 400 ``unknown variant image_url`` → 桥报错、宿主 fatal。
+
+    默认策略（安全优先）：把 `images` 剥离，并将图片引用降级为一段文本说明
+    追加到 ``ground_truth_note``（verifier 至少知道本次评估携带了图片）。
+    仅当环境变量 ``LLM_VERIFIER_ALLOW_IMAGES=1`` 时才透传，供真正支持
+    多模态的后端（如 Vertex/Gemini）显式开启。
+    """
+    images = kwargs.get("images")
+    if not images:
+        return
+    allow = os.environ.get("LLM_VERIFIER_ALLOW_IMAGES", "").strip().lower()
+    if allow in ("1", "true", "yes", "on"):
+        return
+    refs: list[str] = []
+    if isinstance(images, (str, os.PathLike)):
+        refs = [str(images)]
+    elif isinstance(images, (list, tuple)):
+        refs = [str(i) for i in images if isinstance(i, (str, os.PathLike))]
+    kwargs.pop("images", None)
+    note = (
+        "[image refs] " + "; ".join(refs[:20])
+        + "（当前后端不支持 image_url 消息，图片已忽略；如需多模态评估，请设置 LLM_VERIFIER_ALLOW_IMAGES=1）"
+    )
+    existing = kwargs.get("ground_truth_note")
+    kwargs["ground_truth_note"] = f"{existing}\n{note}" if existing else note
+    sys.stderr.write(
+        f"[dsh-llm-verifier] {method}: 已剥离 images（避免 DeepSeek image_url 400）"
+        "；如需多模态请设置 LLM_VERIFIER_ALLOW_IMAGES=1\n"
+    )
+
+
 def _require_library() -> None:
     if llm_verifier is None:
         raise RuntimeError(
@@ -140,6 +176,7 @@ def _handle_select(params: dict[str, Any]) -> dict[str, Any]:
     # LLM 评分并拖到桥超时（300s）乃至拖垮启动；调用方显式传参时不受影响。
     kwargs.setdefault("n_evaluations", 1)
     kwargs.setdefault("pivots", 2)
+    _sanitize_images(kwargs, "select")
     kwargs = _filter_kwargs(kwargs, {
         "criteria", "images", "ground_truth_note", "n_evaluations",
         "pivots", "seed", "max_workers", "model", "cache", "progress",
@@ -171,6 +208,7 @@ def _handle_compare(params: dict[str, Any]) -> dict[str, Any]:
     kwargs["criteria"] = _criteria(criteria if criteria is not None else DEFAULT_CRITERIA)
     # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
     kwargs.setdefault("n_evaluations", 1)
+    _sanitize_images(kwargs, "compare")
     kwargs = _filter_kwargs(kwargs, {
         "criteria", "images", "ground_truth_note", "n_evaluations",
         "max_workers", "model", "client",
@@ -190,6 +228,7 @@ def _handle_track(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("track requires a non-empty `steps` array")
     # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
     kwargs.setdefault("n_evaluations", 1)
+    _sanitize_images(kwargs, "track")
     kwargs = _filter_kwargs(kwargs, {
         "images", "checkpoint_steps", "n_evaluations", "max_workers",
         "model", "client",
@@ -207,6 +246,7 @@ def _handle_progress_start(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("progress_start requires a non-empty `problem` string")
     # 默认收敛评估开销，避免官方默认 n_evaluations 触发过多评分调用（见 select）。
     kwargs.setdefault("n_evaluations", 1)
+    _sanitize_images(kwargs, "progress_start")
     kwargs = _filter_kwargs(kwargs, {
         "images", "n_evaluations", "max_workers", "model", "client",
     })
@@ -225,6 +265,7 @@ def _handle_progress_update(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(step, str):
         raise ValueError("progress_update requires a `step` string")
     kwargs = _filter_kwargs(dict(params), {"images"})
+    _sanitize_images(kwargs, "progress_update")
     score = _TRACKERS[tracker_id].update(step, **kwargs)
     return _jsonable({"score": score})
 
