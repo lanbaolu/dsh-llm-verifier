@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PythonBridge } from './bridge.ts'
 import type { Criteria, VerifierCompareArgs, VerifierProgressArgs, VerifierSelectArgs, VerifierTrackArgs } from './types.ts'
+import { recordProgressClose, recordProgressStart, recordProgressUpdate } from './progress.ts'
 
 /** Criteria accepts a preset name ("terminal_bench") or a JSON object string. */
 function parseCriteria(raw: string | undefined): Criteria | undefined {
@@ -197,26 +198,36 @@ export function registerVerifierTools(ctx: Context, getBridge: () => Promise<Pyt
             case 'start': {
               if (!args.problem) throw new Error('verifier_progress start requires `problem`')
               const criteria = parseCriteria(args.criteria)
-              return bridge.request<Record<string, any>>('progress_start', {
+              const result = await bridge.request<Record<string, any>>('progress_start', {
                 problem: args.problem,
                 ...(criteria !== undefined ? { criteria } : {}),
                 ...(args.model !== undefined ? { model: args.model } : {}),
                 ...(args.n_evaluations !== undefined ? { n_evaluations: args.n_evaluations } : {}),
                 ...(args.seed !== undefined ? { seed: args.seed } : {}),
               })
+              if (typeof result?.tracker_id === 'string') {
+                recordProgressStart(result.tracker_id, args.problem, args.model, args.n_evaluations)
+              }
+              return result
             }
             case 'update': {
               if (!args.tracker_id) throw new Error('verifier_progress update requires `tracker_id`')
               if (!args.step) throw new Error('verifier_progress update requires `step`')
-              return bridge.request<Record<string, any>>('progress_update', {
+              const result = await bridge.request<Record<string, any>>('progress_update', {
                 tracker_id: args.tracker_id,
                 step: args.step,
                 ...(args.images !== undefined ? { images: args.images } : {}),
               })
+              if (typeof result?.score === 'number') {
+                recordProgressUpdate(args.tracker_id, args.step, result.score)
+              }
+              return result
             }
             case 'close': {
               if (!args.tracker_id) throw new Error('verifier_progress close requires `tracker_id`')
-              return bridge.request<Record<string, any>>('progress_close', { tracker_id: args.tracker_id })
+              const result = await bridge.request<Record<string, any>>('progress_close', { tracker_id: args.tracker_id })
+              recordProgressClose(args.tracker_id)
+              return result
             }
           }
         },

@@ -19,6 +19,11 @@
 - [x] **P1 超时与参数优化**：默认桥超时提高到 `300s`；`select` / `compare` 的 `criteria` 设为必填；工具描述建议 `n_evaluations=1`、`pivots=2` 控制耗时。
 - [x] **P2 Evaluator 服务化**：新增 `ctx.verifierEvaluator` 服务，其他 DSH 插件/命令可直接复用桥能力。
 - [x] **P2 轨迹批量评分**：新增 `/evaluate-session` 命令，提取当前会话 assistant 步骤并 `track` 评分，导出到 `scores/<sessionId>.jsonl`。
+- [x] **P2 Web UI（后端选择 + 分数曲线）**：
+  - DSH 设置页新增 “LLM Verifier” 面板：可选 `auto / DeepSeek / Vertex AI / OpenAI 兼容` 后端，配置默认 model 与桥超时。
+  - 配置持久化到 `~/.dsh/llm-verifier/config.json`，切换后端/模型后桥进程在下次 verifier 调用时按新配置重启。
+  - 新增 `/@lanbaolu/dsh-llm-verifier/config`、`/progress`、`/progress/clear` 同源 API。
+  - ProgressTracker 每次 update 的分数写入进程内历史，设置页以 SVG 折线图展示分数曲线。
 - [x] **Agent 主动性（层次 1）**：插件向 system prompt 注入“LLM Verifier 使用策略”，引导 agent 自动使用 verifier 工具（不修改 router-standard，不改变工具面）。
 
 ## ⚠️ 当前状态与限制
@@ -28,6 +33,7 @@
 - 依赖 verifier 后端返回 logprobs；DSH 的 `ctx.llm` 流式接口不暴露 logprobs，桥独立走官方包配置的后端。
 - DeepSeek 下 `progress` 早期步骤分数可能接近 0，属于官方评分分布特性，链路本身正常。
 - 异步任务为进程内内存态，DSH 重启后任务丢失。
+- Web UI 的 ProgressTracker 分数曲线历史也是进程内内存态，DSH 重启后清空。
 
 ## 🚧 待验证
 

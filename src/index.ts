@@ -7,14 +7,23 @@
  * stays upstream; this plugin only owns process/JSON plumbing and tool
  * contracts.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { PythonBridge } from './bridge.ts'
 import { registerVerifierTools } from './tools.ts'
 import { VerifierEvaluatorService } from './service.ts'
+import { clearProgressRecords, listProgressRecords } from './progress.ts'
+import {
+  registerVerifierWebRoutes,
+  type AvailableBackend,
+  type BackendId,
+  type SaveConfigInput,
+  type VerifierRuntimeConfig,
+} from './web.ts'
 
 export const name = '@dsh-external/dsh-llm-verifier'
 export const inject = ['tools', 'credentials', 'systemPrompt']
@@ -49,6 +58,62 @@ function resolveDefaultPythonBin(): string {
     }
   }
   return candidates[candidates.length - 1] ?? (process.platform === 'win32' ? 'python' : 'python3')
+}
+
+/** DSH 用户配置目录（与微信桥等插件一致，存放在 DSH_HOME 下）。 */
+function dshHomeDir(): string {
+  return process.env.DSH_HOME || join(homedir(), '.dsh')
+}
+
+function persistedConfigPath(): string {
+  return join(dshHomeDir(), 'llm-verifier', 'config.json')
+}
+
+interface RuntimeConfigStore {
+  backend: BackendId
+  model: string
+  /** 用户显式指定的 pythonBin；空字符串表示使用插件自动解析（.venv 优先）。 */
+  pythonBin: string
+  bridgeTimeoutMs: number
+}
+
+function defaultRuntimeStore(config: Config): RuntimeConfigStore {
+  return {
+    backend: 'auto',
+    model: config.verifierModel ?? '',
+    pythonBin: config.pythonBin ?? '',
+    bridgeTimeoutMs: config.bridgeTimeoutMs ?? 300_000,
+  }
+}
+
+function loadRuntimeStore(config: Config): RuntimeConfigStore {
+  const defaults = defaultRuntimeStore(config)
+  try {
+    const raw = JSON.parse(readFileSync(persistedConfigPath(), 'utf8')) as Record<string, unknown>
+    return {
+      backend: (['auto', 'deepseek', 'vertex', 'openai'] as const).includes(raw.backend as BackendId)
+        ? raw.backend as BackendId
+        : defaults.backend,
+      model: typeof raw.model === 'string' ? raw.model : defaults.model,
+      pythonBin: typeof raw.pythonBin === 'string' ? raw.pythonBin : defaults.pythonBin,
+      bridgeTimeoutMs: typeof raw.bridgeTimeoutMs === 'number' && raw.bridgeTimeoutMs > 0
+        ? raw.bridgeTimeoutMs
+        : defaults.bridgeTimeoutMs,
+    }
+  } catch {
+    return defaults
+  }
+}
+
+function persistRuntimeStore(store: RuntimeConfigStore): void {
+  const file = persistedConfigPath()
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify({
+    backend: store.backend,
+    model: store.model,
+    pythonBin: store.pythonBin,
+    bridgeTimeoutMs: store.bridgeTimeoutMs,
+  }, null, 2) + '\n', 'utf8')
 }
 
 /** 注册 /bestofn 命令：手动触发 Best-of-N 选优。 */
@@ -197,6 +262,7 @@ const VERIFIER_AGENT_STRATEGY = `## LLM Verifier 使用策略
 export function apply(ctx: Context, config: Config): void {
   let bridge: PythonBridge | undefined
   let bridgePromise: Promise<PythonBridge> | undefined
+  const store: RuntimeConfigStore = loadRuntimeStore(config)
 
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const assembled = await next()
@@ -214,8 +280,9 @@ export function apply(ctx: Context, config: Config): void {
     'VERTEX_API_KEY',
     'OPENAI_API_KEY',
     'OPENAI_BASE_URL',
-  ]
-  const loadCredentialsEnv = async (): Promise<Record<string, string>> => {
+  ] as const
+
+  const loadAllCredentialEnv = async (): Promise<Record<string, string>> => {
     try {
       const credentials = (ctx as any).credentials
       if (!credentials || typeof credentials.resolve !== 'function') {
@@ -237,19 +304,131 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /** 按 UI 选择的后端过滤凭据，避免 OPENAI_BASE_URL 优先级压过 DeepSeek。 */
+  const filterEnvByBackend = (all: Record<string, string>, backend: BackendId): Record<string, string> => {
+    switch (backend) {
+      case 'deepseek':
+        return all.DEEPSEEK_API_KEY ? { DEEPSEEK_API_KEY: all.DEEPSEEK_API_KEY } : {}
+      case 'vertex':
+        return all.VERTEX_API_KEY ? { VERTEX_API_KEY: all.VERTEX_API_KEY } : {}
+      case 'openai': {
+        const env: Record<string, string> = {}
+        if (all.OPENAI_BASE_URL) env.OPENAI_BASE_URL = all.OPENAI_BASE_URL
+        if (all.OPENAI_API_KEY) env.OPENAI_API_KEY = all.OPENAI_API_KEY
+        return env
+      }
+      case 'auto':
+      default:
+        return all
+    }
+  }
+
+  const getConfig = (): VerifierRuntimeConfig => ({
+    backend: store.backend,
+    model: store.model,
+    pythonBin: store.pythonBin || resolveDefaultPythonBin(),
+    bridgeTimeoutMs: store.bridgeTimeoutMs,
+  })
+
+  const detectBackends = async (): Promise<AvailableBackend[]> => {
+    const all = await loadAllCredentialEnv()
+    const hasDeepseek = Boolean(all.DEEPSEEK_API_KEY)
+    const hasVertex = Boolean(all.VERTEX_API_KEY)
+    const hasOpenai = Boolean(all.OPENAI_API_KEY)
+    const anyConfigured = hasDeepseek || hasVertex || hasOpenai
+    const backends: AvailableBackend[] = [
+      {
+        id: 'auto',
+        label: '自动选择',
+        configured: anyConfigured,
+        detail: anyConfigured
+          ? '按官方优先级自动使用 OPENAI_BASE_URL > DEEPSEEK_API_KEY > VERTEX_API_KEY'
+          : '未检测到任何 verifier 后端凭据',
+      },
+      {
+        id: 'deepseek',
+        label: 'DeepSeek',
+        configured: hasDeepseek,
+        detail: hasDeepseek ? '已配置 DEEPSEEK_API_KEY' : '未配置 DEEPSEEK_API_KEY',
+      },
+      {
+        id: 'vertex',
+        label: 'Vertex AI',
+        configured: hasVertex,
+        detail: hasVertex ? '已配置 VERTEX_API_KEY' : '未配置 VERTEX_API_KEY',
+      },
+      {
+        id: 'openai',
+        label: 'OpenAI 兼容',
+        configured: hasOpenai,
+        detail: hasOpenai
+          ? (all.OPENAI_BASE_URL ? `已配置 OPENAI_API_KEY（${all.OPENAI_BASE_URL}）` : '已配置 OPENAI_API_KEY（使用官方默认端点）')
+          : '未配置 OPENAI_API_KEY',
+      },
+    ]
+    return backends
+  }
+
+  const restartBridge = async (): Promise<void> => {
+    if (bridgePromise) {
+      try {
+        await bridgePromise
+      } catch {
+        // 桥启动失败时继续清理，让下一次调用重新尝试
+      }
+    }
+    bridge?.close()
+    bridge = undefined
+    bridgePromise = undefined
+  }
+
+  const saveConfig = async (input: SaveConfigInput): Promise<{ ok: boolean; message: string; restartBridge: boolean }> => {
+    const before = { ...store }
+
+    if (input.backend !== undefined) {
+      const backends = await detectBackends()
+      if (input.backend !== 'auto') {
+        const selected = backends.find((item) => item.id === input.backend)
+        if (!selected?.configured) {
+          return { ok: false, message: `后端 ${selected?.label ?? input.backend} 未配置凭据，无法切换`, restartBridge: false }
+        }
+      }
+      store.backend = input.backend
+    }
+    if (input.model !== undefined) store.model = input.model.trim()
+    if (input.pythonBin !== undefined) store.pythonBin = input.pythonBin.trim()
+    if (input.bridgeTimeoutMs !== undefined) store.bridgeTimeoutMs = input.bridgeTimeoutMs
+
+    const changed = before.backend !== store.backend
+      || before.model !== store.model
+      || before.pythonBin !== store.pythonBin
+      || before.bridgeTimeoutMs !== store.bridgeTimeoutMs
+    if (!changed) {
+      return { ok: true, message: '配置未变化', restartBridge: false }
+    }
+
+    persistRuntimeStore(store)
+    await restartBridge()
+    const parts = ['配置已保存']
+    if (before.backend !== store.backend) parts.push(`后端：${store.backend}`)
+    if (before.model !== store.model) parts.push(`模型：${store.model || '默认'}`)
+    return { ok: true, message: `${parts.join('；')}。桥进程将在下次调用时按新配置启动。`, restartBridge: true }
+  }
+
   const getBridge = async (): Promise<PythonBridge> => {
     if (bridge && bridge.isRunning) return bridge
     if (bridgePromise) return bridgePromise
     bridgePromise = (async () => {
-      const pythonBin = config.pythonBin || resolveDefaultPythonBin()
+      const runtime = getConfig()
       const scriptUrl = new URL('./bridge/llm_verifier_bridge.py', import.meta.url)
-      const credentialsEnv = await loadCredentialsEnv()
+      const allCredentialEnv = await loadAllCredentialEnv()
+      const credentialsEnv = filterEnvByBackend(allCredentialEnv, runtime.backend)
       const env = {
         ...process.env,
         ...credentialsEnv,
-        ...(config.verifierModel !== undefined && config.verifierModel !== '' ? { LLM_VERIFIER_MODEL: config.verifierModel } : {}),
+        ...(runtime.model !== '' ? { LLM_VERIFIER_MODEL: runtime.model } : {}),
       }
-      const next = new PythonBridge(scriptUrl, pythonBin, config.bridgeTimeoutMs ?? 300_000, env)
+      const next = new PythonBridge(scriptUrl, runtime.pythonBin, runtime.bridgeTimeoutMs, env)
       next.start()
       bridge = next
       return next
@@ -264,7 +443,16 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   ctx.effect(() => {
+    const webDisposers = registerVerifierWebRoutes(ctx, {
+      getConfig,
+      saveConfig,
+      detectBackends,
+      listProgress: listProgressRecords,
+      clearProgress: clearProgressRecords,
+      getDiagnostics: () => bridge?.diagnostics ?? '',
+    })
     return () => {
+      for (const dispose of webDisposers) dispose()
       bridgePromise = undefined
       bridge?.close()
       bridge = undefined

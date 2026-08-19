@@ -81,9 +81,9 @@
 4. **多模态验证**
    - 真实验证 `images` 参数（截图、图表、UI 图）并补充文档。
 
-5. **Web UI**
-   - 在 DSH 设置页选择 verifier 后端/model。
-   - 展示 ProgressTracker 分数曲线。
+5. **Web UI** ✅
+   - 在 DSH 设置页选择 verifier 后端/model（`auto / DeepSeek / Vertex AI / OpenAI 兼容`）。
+   - 展示 ProgressTracker 分数曲线（SVG 折线图 + 最近步骤列表）。
 
 ## P3：原生与规模化（远期）
 

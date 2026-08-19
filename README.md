@@ -60,6 +60,7 @@ DSH_CHECKOUT=<dsh-source-checkout> bash scripts/build.sh
 
 - `lib/index.js` / `lib/bridge.js` / `lib/tools.js`：Host 插件
 - `lib/bridge/llm_verifier_bridge.py`：Python 桥（随包分发）
+- `lib/client.js`：Web 设置面板（`npm run build:client`，或直接 `npm run build` 一起构建）
 
 ### 3. 注入 / 安装
 
@@ -96,6 +97,16 @@ dsh plugin --profile web add /path/to/llm-verifier
         bridgeTimeoutMs: 180000
         verifierModel: deepseek-v4-flash
 ```
+
+## Web 设置面板
+
+DSH 设置页会出现 **✅ LLM Verifier** 面板，功能：
+
+- **后端选择**：`自动选择 / DeepSeek / Vertex AI / OpenAI 兼容`，未配置凭据的后端会禁用并提示原因。
+- **默认 model / 桥超时**：留空 model 表示使用后端默认模型。
+- **分数曲线**：展示 `verifier_progress` 的 ProgressTracker 分数历史（SVG 折线图 + 最近步骤），可清空历史。
+
+配置保存到 `~/.dsh/llm-verifier/config.json`；切换后端/模型后，桥进程会在下一次 verifier 调用时按新配置重启，无需重启 DSH。
 
 ## DSH 工具
 
@@ -180,6 +191,7 @@ candidates=["def reverse(s): return s[::-1]", "def reverse(s): return ''.join(re
 - ✅ **四个核心工具真实端到端调用全部跑通**（DeepSeek 后端）
 - ✅ 自动复用 Harness `ctx.credentials` 中的模型凭据，无需用户单独配 key
 - ✅ P1 完成：`/bestofn`、结果缓存、异步任务、超时优化
-- ✅ P2 进行中：`ctx.verifierEvaluator` 服务、`/evaluate-session` 轨迹评分导出
+- ✅ P2 完成：`ctx.verifierEvaluator` 服务、`/evaluate-session` 轨迹评分导出、Web 设置面板（后端选择 + 分数曲线）
 - ⚠️ 依赖 verifier 后端返回 logprobs；DSH 的 `ctx.llm` 流式接口不暴露 logprobs，桥独立走官方包配置的后端
+- ⏳ 待验证：真实长任务中 `verifier_task_start` / `verifier_task_status` 的体验
 - ⏭️ 详细进度见 [docs/PROGRESS.md](docs/PROGRESS.md) 和 [docs/ROADMAP.md](docs/ROADMAP.md)
