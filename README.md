@@ -1,5 +1,14 @@
 # @dsh-external/dsh-llm-verifier
 
+> [!WARNING]
+> ## ⚠️ 实验阶段（Experimental）
+> 本插件**仍处于实验阶段**，尚未达到稳定可用标准，请勿在生产环境启用；如需联调，建议在隔离的 profile / 会话中验证。
+> 当前已确认的稳定性风险：
+> - Python stdio 桥向 DeepSeek API 发送不被接受的 `image_url` 消息格式（该 API 端点只接受 `text`），曾导致 DSH 启动期 `fatal load failure`；
+> - 依赖 verifier 后端返回 `logprobs`，`ctx.llm` 流式接口不暴露，桥独立走官方包配置的后端；
+> - 异步任务表与 Web UI 分数曲线均为**进程内内存态**，DSH 重启/插件重载后任务丢失；
+> - 插件通过 super-injector（插件注入管理器）注入时，需保证 `cordis.patch.yml` 的 disabled 用与 registry 一致的完整包名（如 `@lanbaolu/dsh-llm-verifier`），否则重启会被自动恢复加载。
+
 LLM-as-a-Verifier bridge for DSH：通过 Python stdio 桥把 `select` / `compare` / `track` / `ProgressTracker` 暴露成 DSH agent 工具。
 
 > 当前实现：**Python stdio 桥 MVP**。Python 侧直接复用官方 [llm-as-a-verifier](https://github.com/llm-as-a-verifier/llm-as-a-verifier) 包，DSH 侧只负责进程/JSON 管道和工具契约。验证有价值后，再考虑 TS 原生移植。
@@ -192,6 +201,7 @@ candidates=["def reverse(s): return s[::-1]", "def reverse(s): return ''.join(re
 - ✅ 自动复用 Harness `ctx.credentials` 中的模型凭据，无需用户单独配 key
 - ✅ P1 完成：`/bestofn`、结果缓存、异步任务、超时优化
 - ✅ P2 完成：`ctx.verifierEvaluator` 服务、`/evaluate-session` 轨迹评分导出、Web 设置面板（后端选择 + 分数曲线）
+- ✅ 已验证：真实长任务异步体验（`verifier_task_start` 立即返回 `running`，轮询 `verifier_task_status` 最终 `done`；实测 select 3 候选约 207s）
 - ⚠️ 依赖 verifier 后端返回 logprobs；DSH 的 `ctx.llm` 流式接口不暴露 logprobs，桥独立走官方包配置的后端
-- ⏳ 待验证：真实长任务中 `verifier_task_start` / `verifier_task_status` 的体验
+- ⚠️ 异步任务表为进程内内存态，DSH/插件重载后任务变 `unknown`；Python 桥单进程串行处理 stdin，多异步任务排队执行
 - ⏭️ 详细进度见 [docs/PROGRESS.md](docs/PROGRESS.md) 和 [docs/ROADMAP.md](docs/ROADMAP.md)

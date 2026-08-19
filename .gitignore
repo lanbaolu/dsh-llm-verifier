@@ -8,3 +8,5 @@ scores/
 .dshwolf/
 __pycache__/
 *.pyc
+
+.agent-teams/

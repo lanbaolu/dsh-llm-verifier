@@ -32,13 +32,24 @@
 - 同时支持 Vertex AI（`VERTEX_API_KEY`）和 OpenAI 兼容后端（`OPENAI_BASE_URL` + `OPENAI_API_KEY`），按官方优先级 `OPENAI_BASE_URL` > `DEEPSEEK_API_KEY` > `VERTEX_API_KEY` 自动选择。
 - 依赖 verifier 后端返回 logprobs；DSH 的 `ctx.llm` 流式接口不暴露 logprobs，桥独立走官方包配置的后端。
 - DeepSeek 下 `progress` 早期步骤分数可能接近 0，属于官方评分分布特性，链路本身正常。
-- 异步任务为进程内内存态，DSH 重启后任务丢失。
+- 异步任务为进程内内存态，DSH 重启/插件重载后任务丢失（`verifier_task_status` 返回 `unknown`）。
+- Python 桥为单进程串行处理 stdin，多个异步任务实际排队执行，总耗时叠加。
 - Web UI 的 ProgressTracker 分数曲线历史也是进程内内存态，DSH 重启后清空。
+
+## ✅ 真实长任务异步验证（2026-08-19）
+
+- [x] 在真实长任务中观察 `verifier_task_start` / `verifier_task_status` 的体验。
+  - 调用 `verifier_task_start(method=select, params=<JSON 字符串>)` 后**立即返回** `task_id=verifier-1` / `status=running`，agent 不被阻塞；等待期间可继续执行 git、文件浏览等工具。
+  - `verifier_task_status` 轮询 8 次稳定返回 `running`，最终 `done` 并带回 `index=1` / `ranking=[1,0,2]` / `scores=[...]`。
+  - 单次真实 select（3 候选，`n_evaluations=1`，`pivots=2`）总耗时约 **207s**。
+- [x] 记录到两个异步体验注意点：
+  1. 异步任务表是**进程内内存态**，DSH/插件重载后任务会全部变为 `unknown`（验证过程中宿主重启后旧任务丢失）。
+  2. Python 桥是**单进程串行处理 stdin**，多个异步任务实际排队执行、总耗时叠加；异步收益主要体现在“agent 不阻塞”，而不是后端并行。
 
 ## 🚧 待验证
 
 - [ ] 重启 DSH 后确认 super-injector 自动从新路径加载插件（当前已通过热重载验证）。
-- [ ] 在真实长任务中观察 `verifier_task_start` / `verifier_task_status` 的体验。
+- [ ] 多模态 `images` 真实验证（可选）。
 
 ## 迁移记录
 
